@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#140F1F">
+<title>For you</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>💐</text></svg>">
+<style>
+  :root {
+    color-scheme: dark;
+    --bg-top: #140F1F;
+    --bg-bottom: #2A1730;
+    --pink: #FF8FB1;
+    --soft: #B9A6C9;
+    box-sizing: border-box;
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  *, *::before, *::after { box-sizing: inherit; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg-bottom);
+    background-image: radial-gradient(ellipse at 50% 35%, #2B1C3D 0%, transparent 60%),
+                      linear-gradient(var(--bg-top), var(--bg-bottom));
+    color: var(--pink);
+    font-family: Menlo, Monaco, "Courier New", monospace;
+    overflow: hidden;
+    -webkit-tap-highlight-color: transparent;
+  }
+  main { height: 100%; display: flex; flex-direction: column; }
+  .stage { flex: 1; min-height: 0; position: relative; }
+  canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+  .message {
+    margin: 0;
+    padding: .25rem 1rem 1.6rem;
+    text-align: center;
+    font-weight: 400;
+    font-size: clamp(1.25rem, 3.6vw, 2.1rem);
+    letter-spacing: .02em;
+    min-height: 2.6em;
+    text-shadow: 0 0 12px rgba(255, 143, 177, .45);
+  }
+  .cursor { display: inline-block; width: .6em; animation: blink 1s steps(1) infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+  .fallback { position: absolute; inset: 0; display: grid; place-items: center;
+              padding: 2rem; text-align: center; color: var(--soft); font-size: 1.1rem; }
+  @media (prefers-reduced-motion: reduce) { .cursor { animation: none; } }
+</style>
+</head>
+<body>
+<main>
+  <div class="stage">
+    <canvas id="art" aria-label="A spinning bouquet of roses, daisies and tulips drawn with text characters, with floating hearts"></canvas>
+    <p class="fallback" id="fallback">If the flowers aren’t showing, open this file in Safari 💐</p>
+  </div>
+  <h1 class="message" id="message">I love you, have a great day</h1>
+</main>
+
+<script>
+(function () {
+  // ---------- settings you can tweak ----------
+  var MESSAGE    = 'I love you, have a great day';
+  var SPIN_SPEED = 0.45;  // turns the bouquet (radians per second)
+  var TILT       = 0.36;  // how much you look down at it
+  var CAM_DIST   = 4.6;   // lower = more dramatic perspective
+  var NUM_HEARTS = 16;
+  var FPS        = 30;
+
+  var reduceMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  document.getElementById('fallback').remove();
+
+  var canvas = document.getElementById('art');
+  var ctx = canvas.getContext('2d');
+  var W, H, cols, rows, cw, ch, K, cyPx, ox, oy, fontPx;
+  var depth, glyph, colR, colG, colB;
+  var RAMP = '.,-~:;=!*#$@';
+  var LIGHT = norm([-0.45, 0.55, -0.7]);
+
+  function norm(v) { var l = Math.hypot(v[0], v[1], v[2]) || 1; return [v[0] / l, v[1] / l, v[2] / l]; }
+  function clamp(x, a, b) { return x < a ? a : x > b ? b : x; }
+  function rand(seed) { var s = seed; return function () { s = (s * 16807) % 2147483647; return (s - 1) / 2147483646; }; }
+
+  // ---------- the 3D model (built once) ----------
+  var P = []; // surface points: x,y,z, nx,ny,nz, material, tone, stemIndex
+  var MAT = {
+    kraft:  [214, 170, 120],
+    ribbon: [235, 80, 120],
+    stem:   [90, 170, 95],
+    leaf:   [70, 160, 90]
+  };
+  function addPoint(x, y, z, n, mat, tone, stem) { P.push([x, y, z, n[0], n[1], n[2], mat, tone, stem == null ? -1 : stem]); }
+
+  // paper cone with a wavy top edge
+  var YB = -1.35, SLOPE = 0.58;
+  function coneR(y) { return 0.12 + (y - YB) * SLOPE; }
+  for (var i = 0; i < 220; i++) {
+    var th = i / 220 * Math.PI * 2;
+    var yTop = 0.05 + 0.07 * Math.sin(5 * th);
+    var n = norm([Math.cos(th), -SLOPE, Math.sin(th)]);
+    var tone = 0.82 + 0.18 * Math.cos(th * 5 + 0.6);
+    for (var j = 0; j <= 70; j++) {
+      var y = YB + (yTop - YB) * j / 70, r = coneR(y);
+      addPoint(r * Math.cos(th), y, r * Math.sin(th), n, 'kraft', tone);
+    }
+    // ribbon band
+    for (var k = 0; k < 6; k++) {
+      var yr = -0.83 + k * 0.016, rr = coneR(yr) + 0.015;
+      addPoint(rr * Math.cos(th), yr, rr * Math.sin(th), n, 'ribbon', 1);
+    }
+  }
+  // bow on the front of the wrap
+  var rb = coneR(-0.79) + 0.03;
+  for (var s = 0; s < 120; s++) {
+    var a = s / 120 * Math.PI * 2;
+    for (var f = 0.15; f <= 1; f += 0.12) {
+      addPoint(f * 0.24 * Math.sin(a), -0.79 + f * 0.1 * Math.sin(2 * a), -rb - 0.02 * Math.abs(Math.sin(a)), [0, 0.2, -1], 'ribbon', 1.05);
+    }
+  }
+  for (var tt = 0; tt <= 1; tt += 0.03) {
+    addPoint(-0.02 - tt * 0.1, -0.8 - tt * 0.25, -rb - 0.01, [0, 0, -1], 'ribbon', 0.85);
+    addPoint(0.02 + tt * 0.11, -0.8 - tt * 0.23, -rb - 0.01, [0, 0, -1], 'ribbon', 0.85);
+  }
+  // leaves peeking out of the wrap
+  for (var L = 0; L < 9; L++) {
+    var phi = L / 9 * Math.PI * 2 + 0.3;
+    var dir = norm([Math.cos(phi), 0.55, Math.sin(phi)]), side = [-Math.sin(phi), 0, Math.cos(phi)];
+    var ln = norm([-Math.cos(phi) * 0.55, 1, -Math.sin(phi) * 0.55]);
+    var bx = 0.7 * Math.cos(phi), bz = 0.7 * Math.sin(phi);
+    for (var u = 0; u <= 1; u += 0.04) {
+      var wdt = Math.sin(Math.PI * u) * 0.11;
+      for (var v = -1; v <= 1; v += 0.25) {
+        addPoint(bx + dir[0] * u * 0.5 + side[0] * v * wdt, -0.02 + dir[1] * u * 0.5, bz + dir[2] * u * 0.5 + side[2] * v * wdt, ln, 'leaf', 0.9 + 0.1 * (1 - Math.abs(v)));
+      }
+    }
+  }
+
+  // flower heads (drawn as flat shapes that always face you)
+  var PINK = [240, 95, 140], RED = [225, 55, 75], BLUSH = [255, 160, 185];
+  var PURPLE = [175, 110, 230], ORANGE = [255, 150, 80];
+  var heads = [{ p: [0, 0.64, 0], type: 'rose', size: 0.29, col: RED, delay: 0.2 }];
+  var ring1 = ['daisy', 'rose', 'tulip', 'daisy', 'rose', 'tulip'];
+  ring1.forEach(function (t, i) {
+    var a = i / 6 * Math.PI * 2;
+    heads.push({ p: [0.42 * Math.cos(a), 0.47, 0.42 * Math.sin(a)], type: t, size: 0.24,
+                 col: t === 'rose' ? (i % 2 ? PINK : BLUSH) : (i % 4 === 2 ? PURPLE : ORANGE), delay: 0.5 + i * 0.12 });
+  });
+  var ring2 = ['rose', 'daisy', 'tulip', 'rose', 'daisy', 'rose', 'tulip', 'daisy', 'rose', 'daisy', 'tulip', 'rose'];
+  ring2.forEach(function (t, i) {
+    var a = i / 12 * Math.PI * 2 + 0.35;
+    heads.push({ p: [0.74 * Math.cos(a), 0.24, 0.74 * Math.sin(a)], type: t, size: 0.2,
+                 col: t === 'rose' ? [PINK, BLUSH, RED][i % 3] : (i % 3 ? PURPLE : ORANGE), delay: 1.1 + i * 0.08 });
+  });
+  var rnd = rand(42);
+  for (var b = 0; b < 16; b++) {
+    var ab = rnd() * Math.PI * 2, rr2 = 0.25 + rnd() * 0.65;
+    heads.push({ p: [rr2 * Math.cos(ab), 0.3 + rnd() * 0.42 - rr2 * 0.15, rr2 * Math.sin(ab)], type: 'breath', size: 0.08, col: [250, 245, 255], delay: 2 + rnd() * 0.8 });
+  }
+  // stems from the bottom of the wrap up to each flower
+  heads.forEach(function (h, hi) {
+    if (h.type === 'breath') return;
+    for (var q = 0; q <= 1; q += 0.025) {
+      var bend = Math.sin(q * Math.PI) * 0.06;
+      addPoint(h.p[0] * q * (1 + bend), -1.2 + (h.p[1] + 1.2) * q, h.p[2] * q * (1 + bend), [0, 0, -1], 'stem', 1, hi);
+    }
+  });
+
+  // ---------- screen setup ----------
+  var sparkles = [], hearts = [];
+  function resize() {
+    var box = canvas.getBoundingClientRect();
+    var dpr = Math.min(window.devicePixelRatio || 1, 2);
+    W = box.width; H = box.height;
+    canvas.width = Math.round(W * dpr); canvas.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    fontPx = clamp(Math.min(H / 64, W / 70), 6, 14);
+    ctx.font = fontPx + 'px Menlo, Monaco, "Courier New", monospace';
+    ctx.textBaseline = 'top';
+    cw = ctx.measureText('M').width; ch = fontPx * 1.1;
+    cols = Math.floor(W / cw); rows = Math.floor(H / ch);
+    ox = (W - cols * cw) / 2; oy = (H - rows * ch) / 2;
+    K = Math.min(H * 1.75, W * 2.0);
+    cyPx = H * 0.45;
+    var size = cols * rows;
+    depth = new Float32Array(size); glyph = new Array(size);
+    colR = new Uint8Array(size); colG = new Uint8Array(size); colB = new Uint8Array(size);
+    var r2 = rand(7); sparkles = [];
+    for (var i = 0; i < Math.round(size / 90); i++) sparkles.push({ c: Math.floor(r2() * cols), r: Math.floor(r2() * rows), ph: r2() * 6.28, sp: 0.6 + r2() * 1.6 });
+    hearts = [];
+    for (var h = 0; h < NUM_HEARTS; h++) hearts.push(newHeart(true));
+  }
+  function newHeart(anywhere) {
+    return { x: Math.random(), y: anywhere ? Math.random() * rows : rows + 2, sp: 1.2 + Math.random() * 2.2,
+             ph: Math.random() * 6.28, c: Math.random() < 0.5 ? [255, 120, 160] : [235, 70, 110] };
+  }
+
+  // ---------- drawing helpers ----------
+  var sinA, cosA, sinT = Math.sin(TILT), cosT = Math.cos(TILT);
+  function view(x, y, z, out) {
+    var x1 = x * cosA + z * sinA, z1 = -x * sinA + z * cosA;
+    out[0] = x1; out[1] = y * cosT + z1 * sinT; out[2] = -y * sinT + z1 * cosT;
+  }
+  function put(col, row, d, chr, r, g, b) {
+    if (col < 0 || row < 0 || col >= cols || row >= rows) return;
+    var i = row * cols + col;
+    if (d < depth[i]) { depth[i] = d; glyph[i] = chr; colR[i] = r; colG[i] = g; colB[i] = b; }
+  }
+  function shadeChar(lum) { return RAMP[clamp(Math.floor(lum * (RAMP.length - 1) + 0.5), 0, RAMP.length - 1)]; }
+
+  function stamp(h, centre, d, grow, t) {
+    var sizePx = h.size * grow / d * K;
+    if (sizePx < 1) return;
+    var pc = (W / 2 + centre[0] / d * K - ox) / cw, pr = (cyPx - centre[1] / d * K - oy) / ch;
+    var rc = Math.ceil(sizePx / cw) + 1, rrw = Math.ceil(sizePx / ch) + 1;
+    var spin = t * 0.25 + h.p[0] * 3;
+    for (var row = Math.floor(pr - rrw); row <= pr + rrw; row++) {
+      for (var col = Math.floor(pc - rc); col <= pc + rc; col++) {
+        var u = (col + 0.5 - pc) * cw / sizePx, v = (row + 0.5 - pr) * ch / sizePx;
+        var r = Math.hypot(u, v); if (r > 1.05) continue;
+        var th = Math.atan2(v, u), chr = null, c = h.col, lum = 1;
+        if (h.type === 'rose') {
+          if (r > 0.95 * (0.9 + 0.1 * Math.cos(5 * th + spin))) continue;
+          var sw = Math.sin(th * 2 + r * 13 - spin * 2);
+          chr = sw > 0.55 ? '@' : sw > 0.1 ? '%' : sw > -0.4 ? '&' : '(';
+          lum = 0.55 + 0.45 * (sw * 0.5 + 0.5) * (1 - r * 0.35);
+        } else if (h.type === 'daisy') {
+          if (r < 0.3) { chr = r < 0.15 ? '@' : '#'; c = [250, 190, 50]; lum = 1 - r; }
+          else {
+            var lobe = Math.pow(Math.abs(Math.cos(6.5 * (th + spin))), 0.6);
+            if (r > 0.98 * (0.5 + 0.5 * lobe)) continue;
+            chr = r > 0.75 ? '.' : lobe > 0.75 ? 'o' : '*'; c = [250, 248, 255]; lum = 0.75 + 0.25 * (1 - v) * 0.5;
+          }
+        } else if (h.type === 'tulip') {
+          var topEdge = -0.5 - 0.42 * Math.pow(Math.abs(Math.cos(u * Math.PI * 1.5)), 3);
+          if (v < topEdge || (u / 0.72) * (u / 0.72) + ((v - 0.15) / 0.85) * ((v - 0.15) / 0.85) > 1) continue;
+          chr = Math.abs(u) < 0.25 ? '#' : Math.abs(u) < 0.5 ? '%' : (u < 0 ? '(' : ')');
+          lum = 0.6 + 0.4 * (1 - Math.abs(u)) * (0.6 + 0.4 * (1 - v) / 2);
+        } else {
+          if (r > 0.9 || ((col + row) & 1)) continue;
+          chr = r < 0.4 ? '*' : '.'; lum = 1;
+        }
+        put(col, row, d - (1 - r * r) * 0.04 * h.size * 10, chr, c[0] * lum | 0, c[1] * lum | 0, c[2] * lum | 0);
+      }
+    }
+  }
+
+  // ---------- frame ----------
+  var start = performance.now(), last = 0, tmp = [0, 0, 0], tmpN = [0, 0, 0];
+  var stemChars = [];
+  function frame(now) {
+    if (!reduceMotion) requestAnimationFrame(frame);
+    if (now - last < 1000 / FPS - 2) return;
+    var dt = Math.min((now - (last || now)) / 1000, 0.1); last = now;
+    var t = (now - start) / 1000;
+    var angle = reduceMotion ? 0.6 : t * SPIN_SPEED + 0.6;
+    sinA = Math.sin(angle); cosA = Math.cos(angle);
+    depth.fill(1e9); glyph.fill(null);
+
+    // stem direction characters for this frame
+    heads.forEach(function (h, hi) {
+      if (h.type === 'breath') return;
+      var a = [0, 0, 0], bpt = [0, 0, 0];
+      view(0, -1.2, 0, a); view(h.p[0], h.p[1], h.p[2], bpt);
+      var dx = bpt[0] / (bpt[2] + CAM_DIST) - a[0] / (a[2] + CAM_DIST);
+      var dy = bpt[1] / (bpt[2] + CAM_DIST) - a[1] / (a[2] + CAM_DIST);
+      stemChars[hi] = Math.abs(dx) < Math.abs(dy) * 0.35 ? '|' : (dx > 0 ? '/' : '\\');
+    });
+
+    // surfaces
+    for (var i = 0; i < P.length; i++) {
+      var p = P[i];
+      view(p[0], p[1], p[2], tmp);
+      var d = tmp[2] + CAM_DIST;
+      var col = Math.floor((W / 2 + tmp[0] / d * K - ox) / cw), row = Math.floor((cyPx - tmp[1] / d * K - oy) / ch);
+      var base = MAT[p[6]], chr, lum;
+      if (p[6] === 'stem') { chr = stemChars[p[8]]; lum = 0.85; }
+      else {
+        view(p[3], p[4], p[5], tmpN);
+        var dot = tmpN[0] * LIGHT[0] + tmpN[1] * LIGHT[1] + tmpN[2] * LIGHT[2];
+        lum = clamp((dot < 0 ? -dot * 0.35 : dot) * 0.8 + 0.2, 0, 1) * p[7];
+        chr = shadeChar(lum);
+        if (p[6] === 'ribbon') chr = lum > 0.5 ? '=' : '-';
+      }
+      var m = 0.35 + 0.65 * lum;
+      put(col, row, d, chr, base[0] * m | 0, base[1] * m | 0, base[2] * m | 0);
+    }
+
+    // flower heads, blooming in one after another
+    for (var hI = 0; hI < heads.length; hI++) {
+      var h = heads[hI];
+      var g = reduceMotion ? 1 : clamp((t - h.delay) / 0.8, 0, 1);
+      if (g <= 0) continue;
+      var grow = 1 + 2.4 * Math.pow(g - 1, 3) + 1.4 * Math.pow(g - 1, 2); // gentle overshoot
+      view(h.p[0], h.p[1], h.p[2], tmp);
+      stamp(h, [tmp[0], tmp[1], tmp[2]], tmp[2] + CAM_DIST - 0.05, grow, t);
+    }
+
+    // background: sparkles and rising hearts (only where nothing else is drawn)
+    sparkles.forEach(function (s) {
+      var tw = Math.sin(t * s.sp + s.ph);
+      if (tw < 0.2) return;
+      var k = s.r * cols + s.c;
+      if (glyph[k]) return;
+      glyph[k] = tw > 0.85 ? '+' : tw > 0.55 ? '*' : '.';
+      var l = 120 + tw * 135 | 0; colR[k] = l; colG[k] = l * 0.95 | 0; colB[k] = l * 0.8 | 0;
+    });
+    hearts.forEach(function (hh, n) {
+      if (!reduceMotion) hh.y -= hh.sp * dt;
+      if (hh.y < -2) hearts[n] = hh = newHeart(false);
+      var c = Math.floor(hh.x * cols + Math.sin(t * 0.9 + hh.ph) * 2.5), r = Math.floor(hh.y);
+      if (c < 0 || r < 0 || c >= cols || r >= rows) return;
+      var k = r * cols + c;
+      if (glyph[k]) return;
+      glyph[k] = '\u2665\uFE0E'; colR[k] = hh.c[0]; colG[k] = hh.c[1]; colB[k] = hh.c[2];
+    });
+
+    // paint
+    ctx.clearRect(0, 0, W, H);
+    var lastStyle = '';
+    for (var rr = 0; rr < rows; rr++) {
+      for (var cc = 0; cc < cols; cc++) {
+        var k2 = rr * cols + cc, gch = glyph[k2];
+        if (!gch) continue;
+        var style = 'rgb(' + colR[k2] + ',' + colG[k2] + ',' + colB[k2] + ')';
+        if (style !== lastStyle) { ctx.fillStyle = style; lastStyle = style; }
+        ctx.fillText(gch, ox + cc * cw, oy + rr * ch);
+      }
+    }
+  }
+
+  // ---------- the message types itself out ----------
+  var msgEl = document.getElementById('message');
+  function typeMessage() {
+    if (reduceMotion) { msgEl.textContent = MESSAGE; return; }
+    msgEl.innerHTML = '<span id="typed"></span><span class="cursor">\u258D</span>';
+    var typed = document.getElementById('typed'), n = 0;
+    setTimeout(function step() {
+      typed.textContent = MESSAGE.slice(0, ++n);
+      if (n < MESSAGE.length) setTimeout(step, MESSAGE[n - 1] === ',' ? 380 : 75);
+    }, 2600);
+  }
+
+  resize();
+  window.addEventListener('resize', function () { resize(); if (reduceMotion) frame(performance.now() + 1000); });
+  typeMessage();
+  requestAnimationFrame(frame);
+  if (reduceMotion) frame(performance.now() + 1000);
+})();
+</script>
+</body>
+</html>
